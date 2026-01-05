@@ -10,6 +10,7 @@ import { McpPromptRegistry } from './prompt-registry';
 import { McpResourceRegistry } from './resource-registry';
 import { McpToolRegistry } from './tool-registry';
 import { logToolDefinition } from './tools/log';
+import { createAppTokenStrategy } from './strategies/app-token';
 
 class McpSession {
   server: McpServer;
@@ -24,18 +25,23 @@ class McpSession {
 
   lastActivity: number;
 
+  tokenId: string | number | null;
+
   constructor(params: {
     server: McpServer;
     transport: StreamableHTTPServerTransport;
     toolRegistry: McpToolRegistry;
     promptRegistry: McpPromptRegistry;
     resourceRegistry: McpResourceRegistry;
+    tokenId: string | number | null;
   }) {
     this.server = params.server;
     this.transport = params.transport;
     this.toolRegistry = params.toolRegistry;
     this.promptRegistry = params.promptRegistry;
     this.resourceRegistry = params.resourceRegistry;
+    this.tokenId = params.tokenId;
+
     this.lastActivity = Date.now();
   }
 
@@ -46,6 +52,9 @@ class McpSession {
 
 export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService => {
   const sessions = new Map<string, McpSession>();
+
+  // Create app-token strategy with injected Strapi instance
+  const appTokenStrategy = createAppTokenStrategy(strapi);
 
   const toolDefinitions = new McpCapabilityDefinitionRegistry<
     'tool',
@@ -82,11 +91,16 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
     const res = ctx.res;
     const sessionId = extractSessionId(req);
 
+    // TODO @Nico: NO CONSOLE
+    console.log('ctx.req.headers:', ctx.req.headers);
+    // TODO @Nico: NO CONSOLE
+    console.log('sessionId:', sessionId);
+
     try {
       let transport: StreamableHTTPServerTransport;
 
       if (sessionId !== undefined) {
-        // Existing session - retrieve transport
+        // Existing session - retrieve transport and verify token identity
         const existingSession = sessions.get(sessionId);
         if (existingSession === undefined) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -100,6 +114,34 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
           return;
         }
         existingSession.updateActivity();
+
+        // Verify the same token is being used for this session
+        const authResult = await appTokenStrategy.authenticate(ctx);
+        if (authResult.authenticated === false) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Unauthorized' },
+              id: null,
+            })
+          );
+          return;
+        }
+
+        const currentTokenId = authResult.credentials?.token?.id || null;
+        if (currentTokenId !== existingSession.tokenId) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Token mismatch for session' },
+              id: null,
+            })
+          );
+          return;
+        }
+
         transport = existingSession.transport;
       } else {
         // Check max sessions limit
@@ -119,6 +161,24 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
         }
 
         // New session initialization
+
+        // Authenticate and gate capabilities based on permissions
+        const authResult = await appTokenStrategy.authenticate(ctx);
+        // TODO @Nico: NO CONSOLE
+        console.log('authResult:', authResult);
+
+        if (authResult.authenticated === false) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Unauthorized' },
+              id: null,
+            })
+          );
+          return;
+        }
+
         const requestBody = ctx.request.body ?? null;
 
         // Create a new MCP server instance for this session
@@ -156,24 +216,46 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
         promptRegistry.bind(mcpServer);
         resourceRegistry.bind(mcpServer);
 
-        // TODO @Nico: Manage Permissions from Auth
+        const { ability, credentials } = authResult;
+        const tokenId = credentials?.token?.id || null;
 
         // Enable devModeOnly capabilities when running `strapi develop`
         const isDevMode = strapi.config.get('autoReload', false);
 
-        toolRegistry.list({ filter: { status: ['disabled'] } }).forEach((cap) => {
-          if (cap.devModeOnly && isDevMode) {
-            toolRegistry.enable(cap.name);
+        // Enable capabilities based on auth + devModeOnly
+        toolDefinitions.values.forEach((def: any) => {
+          const shouldEnableDevMode = def.devModeOnly && isDevMode;
+          const shouldEnableAuth =
+            def.auth?.actions && ability
+              ? def.auth.actions.every((action: string) => ability.can(action))
+              : false;
+
+          if (shouldEnableDevMode || shouldEnableAuth) {
+            toolRegistry.enable(def.name);
           }
         });
-        promptRegistry.list({ filter: { status: ['disabled'] } }).forEach((cap) => {
-          if (cap.devModeOnly && isDevMode) {
-            promptRegistry.enable(cap.name);
+
+        promptDefinitions.values.forEach((def: any) => {
+          const shouldEnableDevMode = def.devModeOnly && isDevMode;
+          const shouldEnableAuth =
+            def.auth?.actions && ability
+              ? def.auth.actions.every((action: string) => ability.can(action))
+              : false;
+
+          if (shouldEnableDevMode || shouldEnableAuth) {
+            promptRegistry.enable(def.name);
           }
         });
-        resourceRegistry.list({ filter: { status: ['disabled'] } }).forEach((cap) => {
-          if (cap.devModeOnly && isDevMode) {
-            resourceRegistry.enable(cap.name);
+
+        resourceDefinitions.values.forEach((def: any) => {
+          const shouldEnableDevMode = def.devModeOnly && isDevMode;
+          const shouldEnableAuth =
+            def.auth?.actions && ability
+              ? def.auth.actions.every((action: string) => ability.can(action))
+              : false;
+
+          if (shouldEnableDevMode || shouldEnableAuth) {
+            resourceRegistry.enable(def.name);
           }
         });
 
@@ -202,9 +284,10 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
               toolRegistry,
               promptRegistry,
               resourceRegistry,
+              tokenId,
             })
           );
-          strapi.log.info('[MCP] Session initialized', { sessionId: id });
+          strapi.log.info('[MCP] Session initialized', { sessionId: id, tokenId });
         };
         const onSessionClosed = (id: string) => {
           cleanupSession(id);
@@ -392,11 +475,7 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
 
   const service: Modules.MCP.McpService = {
     isEnabled() {
-      return (
-        strapi.config.get('server.mcp.enabled', false) &&
-        // Only enabled in development mode until Auth is implemented
-        strapi.config.get('autoReload') === true
-      );
+      return strapi.config.get('server.mcp.enabled', false);
     },
 
     isRunning() {
@@ -450,7 +529,9 @@ export const createMcpService = (strapi: Core.Strapi): Modules.MCP.McpService =>
       // Set status to 'starting' immediately to prevent late registrations
       status = 'starting';
 
-      // TODO @Nico: Add MCP access policies?
+      // Note: MCP routes handle auth internally via app-token strategy
+      // We use auth: false here because MCP uses a custom protocol that doesn't
+      // fit the standard Strapi route auth middleware pattern
       strapi.server.routes([
         {
           method: 'POST',

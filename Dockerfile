@@ -13,15 +13,15 @@ COPY package.json yarn.lock ./
 # Copy packages directory (needed for workspace:* dependencies)
 COPY packages ./packages
 
-# Copy plugins directory (needed for workspace-plugin dependency)
+# Copy examples/plugins directory (needed for workspace-plugin dependency)
 COPY examples/plugins ./examples/plugins
 
-# Copy example app package.json
+# Copy example app package.json files (needed for workspace resolution)
 COPY examples/getstarted/package.json ./examples/getstarted/
 
 # Install dependencies from root to resolve workspace dependencies
-# This will install all workspace packages without building them
-RUN yarn install --frozen-lockfile
+# Using --immutable for yarn 4 (equivalent to --frozen-lockfile in yarn 3)
+RUN yarn install --immutable
 
 # Copy the app source code
 COPY examples/getstarted ./examples/getstarted

@@ -24,10 +24,13 @@ COPY examples/getstarted/package.json ./examples/getstarted/
 # TODO: Fix yarn.lock sync issue and restore --immutable flag
 RUN yarn install
 
+# Build workspace packages (needed for strapi CLI and dependencies)
+RUN yarn build:code
+
 # Copy the app source code
 COPY examples/getstarted ./examples/getstarted
 
-# Build only the app (not all packages)
+# Build the app
 WORKDIR /app/examples/getstarted
 RUN yarn build
 

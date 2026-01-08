@@ -10,6 +10,9 @@ WORKDIR /app
 # Copy root package files first (needed for workspace resolution)
 COPY package.json yarn.lock ./
 
+# Copy Nx configuration (needed for building workspace packages)
+COPY nx.json ./
+
 # Copy packages directory (needed for workspace:* dependencies)
 COPY packages ./packages
 

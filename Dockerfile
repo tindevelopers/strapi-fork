@@ -13,6 +13,9 @@ COPY package.json yarn.lock ./
 # Copy packages directory (needed for workspace:* dependencies)
 COPY packages ./packages
 
+# Copy plugins directory (needed for workspace-plugin dependency)
+COPY examples/plugins ./examples/plugins
+
 # Copy example app package.json
 COPY examples/getstarted/package.json ./examples/getstarted/
 
